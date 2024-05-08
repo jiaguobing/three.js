@@ -1,227 +1,552 @@
-import { MathUtils } from '../../../../build/three.module.js';
+import { EventDispatcher } from 'three';
+import { NodeUpdateType } from './constants.js';
+import { getNodeChildren, getCacheKey } from './NodeUtils.js';
+import { MathUtils } from 'three';
 
-function Node( type ) {
+const NodeClasses = new Map();
 
-	this.uuid = MathUtils.generateUUID();
+let _nodeId = 0;
 
-	this.name = '';
+class Node extends EventDispatcher {
 
-	this.type = type;
+	constructor( nodeType = null ) {
 
-	this.userData = {};
+		super();
 
-}
+		this.nodeType = nodeType;
 
-Node.prototype = {
+		this.updateType = NodeUpdateType.NONE;
+		this.updateBeforeType = NodeUpdateType.NONE;
 
-	constructor: Node,
+		this.uuid = MathUtils.generateUUID();
 
-	isNode: true,
+		this.version = 0;
 
-	hashProperties: undefined,
+		this._cacheKey = null;
+		this._cacheKeyVersion = 0;
 
-	analyze: function ( builder, settings ) {
+		this.isNode = true;
 
-		settings = settings || {};
+		Object.defineProperty( this, 'id', { value: _nodeId ++ } );
 
-		builder.analyzing = true;
+	}
 
-		this.build( builder.addFlow( settings.slot, settings.cache, settings.context ), 'v4' );
+	set needsUpdate( value ) {
 
-		builder.clearVertexNodeCode();
-		builder.clearFragmentNodeCode();
+		if ( value === true ) {
 
-		builder.removeFlow();
-
-		builder.analyzing = false;
-
-	},
-
-	analyzeAndFlow: function ( builder, output, settings ) {
-
-		settings = settings || {};
-
-		this.analyze( builder, settings );
-
-		return this.flow( builder, output, settings );
-
-	},
-
-	flow: function ( builder, output, settings ) {
-
-		settings = settings || {};
-
-		builder.addFlow( settings.slot, settings.cache, settings.context );
-
-		var flow = {};
-		flow.result = this.build( builder, output );
-		flow.code = builder.clearNodeCode();
-		flow.extra = builder.context.extra;
-
-		builder.removeFlow();
-
-		return flow;
-
-	},
-
-	build: function ( builder, output, uuid ) {
-
-		output = output || this.getType( builder, output );
-
-		var data = builder.getNodeData( uuid || this );
-
-		if ( builder.analyzing ) {
-
-			this.appendDepsNode( builder, data, output );
+			this.version ++;
 
 		}
 
-		if ( builder.nodes.indexOf( this ) === - 1 ) {
+	}
 
-			builder.nodes.push( this );
+	get type() {
+
+		return this.constructor.type;
+
+	}
+
+	onUpdate( callback, updateType ) {
+
+		this.updateType = updateType;
+		this.update = callback.bind( this.getSelf() );
+
+		return this;
+
+	}
+
+	onFrameUpdate( callback ) {
+
+		return this.onUpdate( callback, NodeUpdateType.FRAME );
+
+	}
+
+	onRenderUpdate( callback ) {
+
+		return this.onUpdate( callback, NodeUpdateType.RENDER );
+
+	}
+
+	onObjectUpdate( callback ) {
+
+		return this.onUpdate( callback, NodeUpdateType.OBJECT );
+
+	}
+
+	onReference( callback ) {
+
+		this.updateReference = callback.bind( this.getSelf() );
+
+		return this;
+
+	}
+
+	getSelf() {
+
+		// Returns non-node object.
+
+		return this.self || this;
+
+	}
+
+	updateReference( /*state*/ ) {
+
+		return this;
+
+	}
+
+	isGlobal( /*builder*/ ) {
+
+		return false;
+
+	}
+
+	* getChildren() {
+
+		for ( const { childNode } of getNodeChildren( this ) ) {
+
+			yield childNode;
 
 		}
 
-		if ( this.updateFrame !== undefined && builder.updaters.indexOf( this ) === - 1 ) {
+	}
 
-			builder.updaters.push( this );
+	dispose() {
+
+		this.dispatchEvent( { type: 'dispose' } );
+
+	}
+
+	traverse( callback ) {
+
+		callback( this );
+
+		for ( const childNode of this.getChildren() ) {
+
+			childNode.traverse( callback );
 
 		}
 
-		return this.generate( builder, output, uuid );
+	}
 
-	},
+	getCacheKey( force = false ) {
 
-	generate: function ( /* builder, output, uuid, type, ns */ ) {
+		force = force || this.version !== this._cacheKeyVersion;
 
-		// This method needs to be implemented in subclasses
+		if ( force === true || this._cacheKey === null ) {
 
-	},
+			this._cacheKey = getCacheKey( this, force );
+			this._cacheKeyVersion = this.version;
 
-	getHash: function () {
+		}
 
-		var hash = '{';
-		var prop, obj;
+		return this._cacheKey;
 
-		for ( prop in this ) {
+	}
 
-			obj = this[ prop ];
+	getHash( /*builder*/ ) {
 
-			if ( obj instanceof Node ) {
+		return this.uuid;
 
-				hash += '"' + prop + '":' + obj.getHash() + ',';
+	}
+
+	getUpdateType() {
+
+		return this.updateType;
+
+	}
+
+	getUpdateBeforeType() {
+
+		return this.updateBeforeType;
+
+	}
+
+	getNodeType( builder ) {
+
+		const nodeProperties = builder.getNodeProperties( this );
+
+		if ( nodeProperties.outputNode ) {
+
+			return nodeProperties.outputNode.getNodeType( builder );
+
+		}
+
+		return this.nodeType;
+
+	}
+
+	getShared( builder ) {
+
+		const hash = this.getHash( builder );
+		const nodeFromHash = builder.getNodeFromHash( hash );
+
+		return nodeFromHash || this;
+
+	}
+
+	setup( builder ) {
+
+		const nodeProperties = builder.getNodeProperties( this );
+
+		for ( const childNode of this.getChildren() ) {
+
+			nodeProperties[ '_node' + childNode.id ] = childNode;
+
+		}
+
+		// return a outputNode if exists
+		return null;
+
+	}
+
+	construct( builder ) { // @deprecated, r157
+
+		console.warn( 'THREE.Node: construct() is deprecated. Use setup() instead.' );
+
+		return this.setup( builder );
+
+	}
+
+	increaseUsage( builder ) {
+
+		const nodeData = builder.getDataFromNode( this );
+		nodeData.usageCount = nodeData.usageCount === undefined ? 1 : nodeData.usageCount + 1;
+
+		return nodeData.usageCount;
+
+	}
+
+	analyze( builder ) {
+
+		const usageCount = this.increaseUsage( builder );
+
+		if ( usageCount === 1 ) {
+
+			// node flow children
+
+			const nodeProperties = builder.getNodeProperties( this );
+
+			for ( const childNode of Object.values( nodeProperties ) ) {
+
+				if ( childNode && childNode.isNode === true ) {
+
+					childNode.build( builder );
+
+				}
 
 			}
 
 		}
 
-		if ( this.hashProperties ) {
+	}
 
-			for ( var i = 0; i < this.hashProperties.length; i ++ ) {
+	generate( builder, output ) {
 
-				prop = this.hashProperties[ i ];
-				obj = this[ prop ];
+		const { outputNode } = builder.getNodeProperties( this );
 
-				hash += '"' + prop + '":"' + String( obj ) + '",';
+		if ( outputNode && outputNode.isNode === true ) {
+
+			return outputNode.build( builder, output );
+
+		}
+
+	}
+
+	updateBefore( /*frame*/ ) {
+
+		console.warn( 'Abstract function.' );
+
+	}
+
+	update( /*frame*/ ) {
+
+		console.warn( 'Abstract function.' );
+
+	}
+
+	build( builder, output = null ) {
+
+		const refNode = this.getShared( builder );
+
+		if ( this !== refNode ) {
+
+			return refNode.build( builder, output );
+
+		}
+
+		builder.addNode( this );
+		builder.addChain( this );
+
+		/* Build stages expected results:
+			- "setup"		-> Node
+			- "analyze"		-> null
+			- "generate"	-> String
+		*/
+		let result = null;
+
+		const buildStage = builder.getBuildStage();
+
+		if ( buildStage === 'setup' ) {
+
+			this.updateReference( builder );
+
+			const properties = builder.getNodeProperties( this );
+
+			if ( properties.initialized !== true || builder.context.tempRead === false ) {
+
+				const stackNodesBeforeSetup = builder.stack.nodes.length;
+
+				properties.initialized = true;
+				properties.outputNode = this.setup( builder );
+
+				if ( properties.outputNode !== null && builder.stack.nodes.length !== stackNodesBeforeSetup ) {
+
+					properties.outputNode = builder.stack;
+
+				}
+
+				for ( const childNode of Object.values( properties ) ) {
+
+					if ( childNode && childNode.isNode === true ) {
+
+						childNode.build( builder );
+
+					}
+
+				}
+
+			}
+
+		} else if ( buildStage === 'analyze' ) {
+
+			this.analyze( builder );
+
+		} else if ( buildStage === 'generate' ) {
+
+			const isGenerateOnce = this.generate.length === 1;
+
+			if ( isGenerateOnce ) {
+
+				const type = this.getNodeType( builder );
+				const nodeData = builder.getDataFromNode( this );
+
+				result = nodeData.snippet;
+
+				if ( result === undefined /*|| builder.context.tempRead === false*/ ) {
+
+					result = this.generate( builder ) || '';
+
+					nodeData.snippet = result;
+
+				}
+
+				result = builder.format( result, type, output );
+
+			} else {
+
+				result = this.generate( builder, output ) || '';
 
 			}
 
 		}
 
-		hash += '"id":"' + this.uuid + '"}';
+		builder.removeChain( this );
 
-		return hash;
+		return result;
 
-	},
+	}
 
-	appendDepsNode: function ( builder, data, output ) {
+	getSerializeChildren() {
 
-		data.deps = ( data.deps || 0 ) + 1;
+		return getNodeChildren( this );
 
-		var outputLen = builder.getTypeLength( output );
+	}
 
-		if ( outputLen > ( data.outputMax || 0 ) || this.getType( builder, output ) ) {
+	serialize( json ) {
 
-			data.outputMax = outputLen;
-			data.output = output;
+		const nodeChildren = this.getSerializeChildren();
 
-		}
+		const inputNodes = {};
 
-	},
+		for ( const { property, index, childNode } of nodeChildren ) {
 
-	setName: function ( name ) {
+			if ( index !== undefined ) {
 
-		this.name = name;
+				if ( inputNodes[ property ] === undefined ) {
 
-		return this;
+					inputNodes[ property ] = Number.isInteger( index ) ? [] : {};
 
-	},
+				}
 
-	getName: function ( /* builder */ ) {
+				inputNodes[ property ][ index ] = childNode.toJSON( json.meta ).uuid;
 
-		return this.name;
+			} else {
 
-	},
+				inputNodes[ property ] = childNode.toJSON( json.meta ).uuid;
 
-	getType: function ( builder, output ) {
-
-		return output === 'sampler2D' || output === 'samplerCube' ? output : this.type;
-
-	},
-
-	getJSONNode: function ( meta ) {
-
-		var isRootObject = ( meta === undefined || typeof meta === 'string' );
-
-		if ( ! isRootObject && meta.nodes[ this.uuid ] !== undefined ) {
-
-			return meta.nodes[ this.uuid ];
+			}
 
 		}
 
-	},
+		if ( Object.keys( inputNodes ).length > 0 ) {
 
-	copy: function ( source ) {
+			json.inputNodes = inputNodes;
 
-		if ( source.name !== undefined ) this.name = source.name;
+		}
 
-		if ( source.userData !== undefined ) this.userData = JSON.parse( JSON.stringify( source.userData ) );
+	}
 
-		return this;
+	deserialize( json ) {
 
-	},
+		if ( json.inputNodes !== undefined ) {
 
-	createJSONNode: function ( meta ) {
+			const nodes = json.meta.nodes;
 
-		var isRootObject = ( meta === undefined || typeof meta === 'string' );
+			for ( const property in json.inputNodes ) {
 
-		var data = {};
+				if ( Array.isArray( json.inputNodes[ property ] ) ) {
 
-		if ( typeof this.nodeType !== 'string' ) throw new Error( 'Node does not allow serialization.' );
+					const inputArray = [];
 
-		data.uuid = this.uuid;
-		data.nodeType = this.nodeType;
+					for ( const uuid of json.inputNodes[ property ] ) {
 
-		if ( this.name !== '' ) data.name = this.name;
+						inputArray.push( nodes[ uuid ] );
 
-		if ( JSON.stringify( this.userData ) !== '{}' ) data.userData = this.userData;
+					}
 
-		if ( ! isRootObject ) {
+					this[ property ] = inputArray;
 
-			meta.nodes[ this.uuid ] = data;
+				} else if ( typeof json.inputNodes[ property ] === 'object' ) {
+
+					const inputObject = {};
+
+					for ( const subProperty in json.inputNodes[ property ] ) {
+
+						const uuid = json.inputNodes[ property ][ subProperty ];
+
+						inputObject[ subProperty ] = nodes[ uuid ];
+
+					}
+
+					this[ property ] = inputObject;
+
+				} else {
+
+					const uuid = json.inputNodes[ property ];
+
+					this[ property ] = nodes[ uuid ];
+
+				}
+
+			}
+
+		}
+
+	}
+
+	toJSON( meta ) {
+
+		const { uuid, type } = this;
+		const isRoot = ( meta === undefined || typeof meta === 'string' );
+
+		if ( isRoot ) {
+
+			meta = {
+				textures: {},
+				images: {},
+				nodes: {}
+			};
+
+		}
+
+		// serialize
+
+		let data = meta.nodes[ uuid ];
+
+		if ( data === undefined ) {
+
+			data = {
+				uuid,
+				type,
+				meta,
+				metadata: {
+					version: 4.6,
+					type: 'Node',
+					generator: 'Node.toJSON'
+				}
+			};
+
+			if ( isRoot !== true ) meta.nodes[ data.uuid ] = data;
+
+			this.serialize( data );
+
+			delete data.meta;
+
+		}
+
+		// TODO: Copied from Object3D.toJSON
+
+		function extractFromCache( cache ) {
+
+			const values = [];
+
+			for ( const key in cache ) {
+
+				const data = cache[ key ];
+				delete data.metadata;
+				values.push( data );
+
+			}
+
+			return values;
+
+		}
+
+		if ( isRoot ) {
+
+			const textures = extractFromCache( meta.textures );
+			const images = extractFromCache( meta.images );
+			const nodes = extractFromCache( meta.nodes );
+
+			if ( textures.length > 0 ) data.textures = textures;
+			if ( images.length > 0 ) data.images = images;
+			if ( nodes.length > 0 ) data.nodes = nodes;
 
 		}
 
 		return data;
 
-	},
+	}
 
-	toJSON: function ( meta ) {
+}
 
-		return this.getJSONNode( meta ) || this.createJSONNode( meta );
+export default Node;
+
+export function addNodeClass( type, nodeClass ) {
+
+	if ( typeof nodeClass !== 'function' || ! type ) throw new Error( `Node class ${ type } is not a class` );
+	if ( NodeClasses.has( type ) ) {
+
+		console.warn( `Redefinition of node class ${ type }` );
+		return;
 
 	}
 
-};
+	NodeClasses.set( type, nodeClass );
+	nodeClass.type = type;
 
-export { Node };
+}
+
+export function createNodeFromType( type ) {
+
+	const Class = NodeClasses.get( type );
+
+	if ( Class !== undefined ) {
+
+		return new Class();
+
+	}
+
+}
